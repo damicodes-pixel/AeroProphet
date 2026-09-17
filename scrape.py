@@ -2,7 +2,7 @@ import os
 import requests
 
 # Download 2 years of data (2024–2025) for a balanced historical graph
-years = [202]
+years = [2024, 2025]
 months = range(1, 13)
 
 base_url = "https://www.transtats.bts.gov/PREZIP/On_Time_Reporting_Carrier_On_Time_Performance_1987_present_{year}_{month}.zip"
