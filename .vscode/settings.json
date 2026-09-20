@@ -1,0 +1,7 @@
+{
+  "python.defaultInterpreterPath": "/Users/dami/AeroProphet/.venv/bin/python",
+  "jupyter.kernels.trusted": [
+    "*"
+  ],
+  "python.terminal.activateEnvironment": true
+}
