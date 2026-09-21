@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AeroProphet Sim</title>
+<style>
+  :root { --bg:#0b1020; --panel:#121a30; --line:#22305a; --text:#dbe4ff; --dim:#8a98c4; }
+  * { box-sizing:border-box; }
+  body { margin:0; height:100vh; display:flex; background:var(--bg); color:var(--text); font:13px/1.4 system-ui,sans-serif; }
+  #stage { flex:1; position:relative; min-width:0; }
+  canvas { position:absolute; top:0; left:0; width:100%; height:100%; display:block; }
+  #tip { position:absolute; pointer-events:none; display:none; background:#000d; border:1px solid var(--line); padding:6px 8px; border-radius:6px; white-space:nowrap; }
+  aside { width:340px; background:var(--panel); border-left:1px solid var(--line); padding:14px; display:flex; flex-direction:column; gap:12px; overflow:hidden; }
+  h1 { font-size:15px; margin:0; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  button, select { background:#1b2750; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:5px 9px; cursor:pointer; }
+  button.on { background:#3454d1; }
+  .score { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .card { background:#0d1428; border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .big { font-size:22px; font-weight:600; }
+  #feed { flex:1; overflow:hidden; display:flex; flex-direction:column; gap:4px; }
+  .item { background:#0d1428; border-left:3px solid var(--line); padding:5px 8px; border-radius:4px; }
+  .dim { color:var(--dim); }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas><div id="tip"></div></div>
+<aside>
+  <h1>AeroProphet · live replay</h1>
+  <div class="dim" id="clock">loading…</div>
+  <div class="row">
+    <button id="play">Pause</button><button id="restart">Restart</button>
+    <span class="dim">speed</span>
+    <select id="speed"><option value="15">15 min/s</option><option value="30" selected>30 min/s</option><option value="60">60 min/s</option><option value="120">120 min/s</option></select>
+  </div>
+  <div class="row">
+    <span class="dim">color by</span>
+    <button data-m="x" class="on">XGBoost</button><button data-m="g">GRU</button><button data-m="a">Actual</button>
+  </div>
+  <div class="score">
+    <div class="card"><div class="dim">XGBoost accuracy</div><div class="big" id="sx">–</div><div class="dim" id="rx"></div></div>
+    <div class="card"><div class="dim">GRU accuracy</div><div class="big" id="sg">–</div><div class="dim" id="rg"></div></div>
+  </div>
+  <div class="dim">Departures board: delay chance (XGB · GRU), then what actually happened</div>
+  <div id="feed"></div>
+</aside>
+
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('c'), ctx = cv.getContext('2d');
+const LEAD = 60;   // minutes a flight shows as "waiting at the gate" before its scheduled departure
+let R, flights, airports, byActual, endT, W, H, proj, P = {};
+let mode = 'x', speed = 30, playing = true;
+let now = 0, last = performance.now(), sched = 0, resolved = 0, lo = 0, feed = [], stats, air = [], lastUI = 0;
+
+const col = p => `hsl(${130 * (1 - Math.max(0, Math.min(1, p)))},85%,55%)`;   // green -> red
+const val = f => mode === 'a' ? Math.min(f.a / 30, 1) : f[mode];
+
+fetch('replay.json').then(r => r.json()).then(d => {
+  R = d; airports = d.airports; flights = d.flights;
+  flights.forEach(f => { f.dep = f.t + f.a; f.arr = f.dep + f.e; });
+  byActual = flights.slice().sort((p, q) => p.dep - q.dep);
+  endT = Math.max(...flights.map(f => f.arr));
+  resize(); reset(); requestAnimationFrame(tick);
+}).catch(err => { $('clock').textContent = 'Error: ' + err.message; console.error(err); });
+
+function reset() {
+  now = flights[0].t - 30; sched = resolved = lo = 0; feed = [];
+  stats = { x: { n: 0, ok: 0, d: 0, hit: 0 }, g: { n: 0, ok: 0, d: 0, hit: 0 } };
+}
+
+function resize() {
+  const r = cv.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  W = r.width; H = r.height; cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const kx = Math.cos(37 * Math.PI / 180), spanX = 59 * kx, spanY = 26, pad = 30;
+  const s = Math.min((W - 2 * pad) / spanX, (H - 2 * pad) / spanY);
+  const ox = (W - spanX * s) / 2, oy = (H - spanY * s) / 2;
+  proj = (lat, lon) => [ox + (lon + 125) * kx * s, oy + (50 - lat) * s];
+}
+addEventListener('resize', () => { if (R) resize(); });
+
+function score(f) {
+  const late = f.a >= 15;
+  for (const m of ['x', 'g']) {
+    const s = stats[m], pred = f[m] >= 0.5;
+    s.n++; if (pred === late) s.ok++;
+    if (late) { s.d++; if (pred) s.hit++; }
+  }
+}
+
+function advance() {
+  while (sched < flights.length && flights[sched].t <= now) { feed.unshift(flights[sched++]); if (feed.length > 14) feed.pop(); }
+  while (resolved < byActual.length && byActual[resolved].dep <= now) score(byActual[resolved++]);
+  if (now > endT) reset();
+}
+
+// simplified continental US outline [lon, lat] and the Great Lakes cut out of it
+const US = [
+  [-124.7,48.4],[-123.1,48.2],[-122.8,49.0],[-95.2,49.0],[-94.6,48.7],[-93.0,48.6],[-91.5,48.1],[-89.6,48.0],
+  [-88.4,48.3],[-86.0,47.7],[-84.7,46.9],[-84.4,46.5],[-83.9,46.0],[-82.5,45.3],[-82.45,43.0],[-83.1,42.3],
+  [-82.7,42.0],[-81.0,42.3],[-79.1,42.85],[-79.05,43.25],[-78.0,43.6],[-76.5,44.0],[-76.3,44.15],[-75.3,44.8],
+  [-74.7,45.0],[-71.5,45.0],[-71.1,45.3],[-70.3,45.9],[-70.0,46.7],[-69.2,47.45],[-68.3,47.35],[-67.8,47.07],
+  [-67.8,45.7],[-67.4,45.2],[-67.0,44.8],[-68.2,44.3],[-69.0,44.0],[-70.2,43.6],[-70.7,43.1],[-70.6,42.65],
+  [-71.0,42.3],[-70.6,41.95],[-70.2,42.05],[-69.95,41.7],[-70.6,41.55],[-71.4,41.45],[-72.9,41.25],[-73.7,40.9],
+  [-72.3,41.15],[-71.9,41.05],[-73.0,40.7],[-74.0,40.55],[-74.0,40.4],[-74.1,39.75],[-74.9,38.95],[-75.1,38.8],
+  [-75.05,38.4],[-75.6,37.5],[-75.95,37.15],[-76.0,36.9],[-75.75,36.2],[-75.5,35.25],[-76.5,34.65],[-77.9,33.9],
+  [-78.9,33.7],[-79.9,32.7],[-81.0,32.0],[-81.4,30.7],[-81.3,29.9],[-80.55,28.4],[-80.0,26.8],[-80.1,25.8],
+  [-80.4,25.2],[-81.1,25.15],[-81.8,26.1],[-82.7,27.5],[-82.8,28.9],[-83.0,29.1],[-83.7,29.9],[-84.3,30.0],
+  [-85.0,29.7],[-85.7,30.15],[-87.2,30.35],[-88.0,30.25],[-89.5,30.15],[-89.4,29.6],[-89.1,29.0],[-90.2,29.1],
+  [-91.3,29.3],[-92.3,29.55],[-93.85,29.7],[-94.75,29.3],[-96.4,28.4],[-97.1,27.7],[-97.3,26.5],[-97.15,25.95],
+  [-98.2,26.05],[-99.1,26.4],[-99.5,27.5],[-100.5,28.7],[-100.9,29.4],[-101.4,29.8],[-102.4,29.75],[-102.9,29.2],
+  [-103.15,28.98],[-104.5,29.6],[-104.9,30.6],[-106.5,31.78],[-108.2,31.78],[-108.2,31.33],[-111.07,31.33],
+  [-114.8,32.5],[-114.7,32.72],[-117.12,32.53],[-117.25,32.7],[-118.4,33.75],[-119.2,34.1],[-120.5,34.45],
+  [-120.65,35.15],[-121.9,36.6],[-122.5,37.7],[-123.0,38.0],[-123.7,38.9],[-124.4,40.4],[-124.1,41.7],
+  [-124.5,42.8],[-124.1,44.0],[-124.0,46.2],[-124.1,46.9],[-124.1,47.5]
+];
+const LAKES = [
+  [[-87.3,41.65],[-87.7,42.0],[-87.8,43.0],[-87.7,44.0],[-87.2,45.0],[-86.6,45.7],[-85.6,46.0],[-84.8,45.8],[-85.4,45.2],[-86.2,44.6],[-86.5,43.5],[-86.4,42.5],[-86.9,41.8]],
+  [[-92.1,46.75],[-90.7,46.95],[-89.6,46.85],[-88.4,47.45],[-87.5,46.55],[-86.0,46.65],[-84.95,46.75],[-84.7,47.0],[-86.0,47.7],[-88.4,48.3],[-89.6,48.0],[-90.5,47.45],[-91.5,47.0]],
+  [[-84.7,45.8],[-84.0,46.0],[-82.5,45.3],[-82.45,43.0],[-83.0,44.05],[-83.9,43.65],[-83.3,44.4],[-83.4,45.05]],
+  [[-83.45,41.75],[-82.7,41.45],[-81.7,41.5],[-80.5,41.95],[-79.05,42.85],[-79.0,42.6],[-80.5,42.4],[-82.0,42.2],[-83.1,42.05]],
+  [[-79.05,43.25],[-77.6,43.3],[-76.5,43.5],[-76.2,43.9],[-76.3,44.1],[-77.5,43.7],[-79.0,43.4]]
+];
+
+function poly(pts, fill, stroke) {
+  ctx.beginPath();
+  pts.forEach(([lon, lat], i) => { const [x, y] = proj(lat, lon); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+  ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke();
+}
+function drawMap() {
+  poly(US, '#131d3d', '#2c3d78');
+  LAKES.forEach(l => poly(l, '#0b1020', '#2c3d78'));
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawMap();
+  for (const c in airports) P[c] = proj(airports[c].lat, airports[c].lon);
+  const wait = {}; air = [];
+  while (lo < flights.length && flights[lo].arr < now) lo++;
+  for (let i = lo; i < flights.length && flights[i].t - LEAD <= now; i++) {
+    const f = flights[i];
+    if (f.arr < now) continue;
+    if (now < f.dep) (wait[f.o] = wait[f.o] || []).push(f); else air.push(f);
+  }
+  ctx.font = '10px system-ui'; ctx.textAlign = 'center';
+  for (const c in P) {
+    const [x, y] = P[c], w = wait[c];
+    if (w) {   // glow = average risk of the flights waiting to leave this airport
+      const avg = w.reduce((s, f) => s + val(f), 0) / w.length;
+      ctx.beginPath(); ctx.arc(x, y, 6 + Math.min(12, w.length * 0.5), 0, 7);
+      ctx.fillStyle = col(avg); ctx.globalAlpha = 0.35; ctx.fill(); ctx.globalAlpha = 1;
+    }
+    ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 7); ctx.fillStyle = '#9fb3ff'; ctx.fill();
+    ctx.fillStyle = '#6f7fb0'; ctx.fillText(c, x, y - 9);
+  }
+  for (const f of air) {
+    const [x0, y0] = P[f.o], [x1, y1] = P[f.d], u = Math.min(1, (now - f.dep) / f.e);
+    const x = x0 + (x1 - x0) * u, y = y0 + (y1 - y0) * u;
+    f._x = x; f._y = y;
+    ctx.strokeStyle = 'rgba(140,160,255,.12)'; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    ctx.save(); ctx.translate(x, y); ctx.rotate(Math.atan2(y1 - y0, x1 - x0));
+    ctx.beginPath(); ctx.moveTo(6, 0); ctx.lineTo(-4, 3.5); ctx.lineTo(-4, -3.5); ctx.closePath();
+    ctx.fillStyle = col(val(f)); ctx.fill(); ctx.restore();
+    if (Math.abs(f.x - f.g) > 0.3) { ctx.beginPath(); ctx.arc(x, y, 8, 0, 7); ctx.strokeStyle = '#fff'; ctx.stroke(); }
+  }
+  const g = ctx.createLinearGradient(16, 0, 156, 0);
+  g.addColorStop(0, col(0)); g.addColorStop(1, col(1));
+  ctx.fillStyle = g; ctx.fillRect(16, H - 30, 140, 8);
+  ctx.fillStyle = '#8a98c4'; ctx.textAlign = 'left';
+  ctx.fillText(mode === 'a' ? 'actual: on time → 30+ min late' : 'chance of a 15+ min delay: 0% → 100%   ·   white ring = models disagree', 16, H - 38);
+}
+
+function ui(t) {
+  if (t - lastUI < 200) return; lastUI = t;
+  $('clock').textContent = new Date(Date.parse(R.start + 'Z') + now * 60000).toISOString().slice(0, 16).replace('T', ' ') + '  ·  scheduled local time';
+  for (const m of ['x', 'g']) {
+    const s = stats[m];
+    $('s' + m).textContent = s.n ? (100 * s.ok / s.n).toFixed(1) + '%' : '–';
+    $('r' + m).textContent = s.n ? `${s.n} scored · caught ${s.d ? (100 * s.hit / s.d).toFixed(0) : 0}% of delays` : '';
+  }
+  $('feed').innerHTML = feed.map(f => {
+    const out = now < f.dep ? '<span class="dim">waiting…</span>'
+      : f.a >= 15 ? `<b style="color:#ff6b6b">+${f.a} min late</b>`
+      : `<b style="color:#5be38a">${f.a <= 0 ? 'on time' : '+' + f.a + ' min'}</b>`;
+    return `<div class="item" style="border-color:${col(f.g)}"><b>${f.o} → ${f.d}</b> <span class="dim">${f.n}</span><br>XGB ${(f.x * 100).toFixed(0)}% · GRU ${(f.g * 100).toFixed(0)}% → ${out}</div>`;
+  }).join('');
+}
+
+function tick(t) {
+  const dt = (t - last) / 1000; last = t;
+  if (playing) now += dt * speed;
+  advance(); draw(); ui(t);
+  requestAnimationFrame(tick);
+}
+
+cv.addEventListener('mousemove', e => {
+  const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top, tip = $('tip');
+  let best = null, bd = 100;
+  for (const f of air) { const d = (f._x - mx) ** 2 + (f._y - my) ** 2; if (d < bd) { bd = d; best = f; } }
+  if (!best) { tip.style.display = 'none'; return; }
+  tip.style.display = 'block'; tip.style.left = mx + 14 + 'px'; tip.style.top = my + 14 + 'px';
+  tip.innerHTML = `<b>${best.o} → ${best.d}</b> ${best.n}<br>XGBoost: ${(best.x * 100).toFixed(0)}%<br>GRU: ${(best.g * 100).toFixed(0)}%<br>Actual: ${best.a >= 15 ? best.a + ' min late' : 'on time (' + best.a + ' min)'}`;
+});
+cv.addEventListener('mouseleave', () => $('tip').style.display = 'none');
+
+$('play').onclick = () => { playing = !playing; $('play').textContent = playing ? 'Pause' : 'Play'; };
+$('restart').onclick = () => reset();
+$('speed').onchange = e => speed = +e.target.value;
+document.querySelectorAll('[data-m]').forEach(b => b.onclick = () => {
+  mode = b.dataset.m;
+  document.querySelectorAll('[data-m]').forEach(x => x.classList.toggle('on', x === b));
+});
+</script>
+</body>
+</html>

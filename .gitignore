@@ -1,5 +1,7 @@
+bts_raw_data/
+sim_data/
+models/
+web/replay.json
+*.npy
 .venv/
 __pycache__/
-*.py[cod]
-.ipynb_checkpoints/
-bts_raw_data/
