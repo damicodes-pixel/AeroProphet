@@ -11,7 +11,7 @@
   #stage { flex:1; position:relative; min-width:0; }
   canvas { position:absolute; top:0; left:0; width:100%; height:100%; display:block; }
   #tip { position:absolute; pointer-events:none; display:none; background:#000d; border:1px solid var(--line); padding:6px 8px; border-radius:6px; white-space:nowrap; }
-  aside { width:340px; background:var(--panel); border-left:1px solid var(--line); padding:14px; display:flex; flex-direction:column; gap:12px; overflow:hidden; }
+  aside { width:380px; background:var(--panel); border-left:1px solid var(--line); padding:14px; display:flex; flex-direction:column; gap:12px; overflow:hidden; }
   h1 { font-size:15px; margin:0; }
   .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
   button, select { background:#1b2750; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:5px 9px; cursor:pointer; }
@@ -20,9 +20,10 @@
   .card { background:#0d1428; border:1px solid var(--line); border-radius:8px; padding:8px; }
   .big { font-size:22px; font-weight:600; }
   .bucket-panel { background:#0d1428; border:1px solid var(--line); border-radius:8px; padding:8px; }
-  .bucket-header, .bucket-row { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:6px; font-size:11px; }
+  .bucket-header, .bucket-row { display:grid; grid-template-columns: 1.2fr 1fr 1fr; gap:6px; font-size:11px; }
   .bucket-header { color:var(--dim); margin-bottom:6px; }
   .bucket-row { padding-top:4px; border-top:1px solid rgba(255,255,255,0.05); }
+  .muted-note { color:var(--dim); font-size:10px; line-height:1.4; }
   #feed { flex:1; overflow:hidden; display:flex; flex-direction:column; gap:4px; }
   .item { background:#0d1428; border-left:3px solid var(--line); padding:5px 8px; border-radius:4px; }
   .dim { color:var(--dim); }
@@ -34,7 +35,7 @@
   <h1>AeroProphet · live replay</h1>
   <div class="dim" id="clock">loading…</div>
   <div class="row">
-    <button id="play">Pause</button><button id="restart">Restart</button>
+    <button id="play">Pause</button><button id="restart">Restart</button><button id="resetView">Reset view</button>
     <span class="dim">speed</span>
     <select id="speed"><option value="15">15 min/s</option><option value="30" selected>30 min/s</option><option value="60">60 min/s</option><option value="120">120 min/s</option></select>
   </div>
@@ -48,6 +49,7 @@
   </div>
   <div class="bucket-panel">
     <div class="dim" style="margin-bottom:6px;">Delay buckets</div>
+    <div class="muted-note">These are actual bucket accuracies: for flights that really landed in each bucket, how often the model placed them in the same bucket.</div>
     <div class="bucket-header">
       <div>Bucket</div>
       <div>XGB</div>
@@ -55,7 +57,7 @@
     </div>
     <div id="buckets"></div>
   </div>
-  <div class="dim">Departures board: delay chance (XGB · GRU), then what actually happened</div>
+  <div class="dim">Departures board: predicted delay risk (XGB · GRU), then actual delay bucket</div>
   <div id="feed"></div>
 </aside>
 
@@ -65,6 +67,7 @@ const cv = $('c'), ctx = cv.getContext('2d');
 const LEAD = 60;   // minutes a flight shows as "waiting at the gate" before its scheduled departure
 const ACTUAL_DELAY_CAP = 90;
 const BUCKETS = ['15-29 min', '30-44 min', '45-59 min', '60+ min'];
+const view = { zoom: 1.0, panX: 0, panY: 0, drag: false, lastX: 0, lastY: 0 };
 let R, flights, airports, byActual, endT, W, H, proj, P = {};
 let mode = 'x', speed = 30, playing = true;
 let now = 0, last = performance.now(), sched = 0, resolved = 0, lo = 0, feed = [], stats, air = [], lastUI = 0;
@@ -110,7 +113,11 @@ function resize() {
   const kx = Math.cos(37 * Math.PI / 180), spanX = 59 * kx, spanY = 26, pad = 30;
   const s = Math.min((W - 2 * pad) / spanX, (H - 2 * pad) / spanY);
   const ox = (W - spanX * s) / 2, oy = (H - spanY * s) / 2;
-  proj = (lat, lon) => [ox + (lon + 125) * kx * s, oy + (50 - lat) * s];
+  proj = (lat, lon) => {
+    const x = ox + (lon + 125) * kx * s;
+    const y = oy + (50 - lat) * s;
+    return [(x - W / 2) * view.zoom + W / 2 + view.panX, (y - H / 2) * view.zoom + H / 2 + view.panY];
+  };
 }
 addEventListener('resize', () => { if (R) resize(); });
 
@@ -214,7 +221,7 @@ function draw() {
   ctx.fillText(
     mode === 'a'
       ? 'actual delay: on time → 90+ min late'
-      : 'risk of a 15+ min departure delay: 0% → 100%   ·   white ring = models disagree',
+      : 'delay risk estimate: 0% → 100% of a 15+ minute departure delay   ·   white ring = model disagreement',
     16,
     H - 38
   );
@@ -254,6 +261,13 @@ function tick(t) {
 
 cv.addEventListener('mousemove', e => {
   const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top, tip = $('tip');
+  if (view.drag) {
+    view.panX += e.clientX - view.lastX;
+    view.panY += e.clientY - view.lastY;
+    view.lastX = e.clientX; view.lastY = e.clientY;
+    resize();
+    return;
+  }
   let best = null, bd = 100;
   for (const f of air) { const d = (f._x - mx) ** 2 + (f._y - my) ** 2; if (d < bd) { bd = d; best = f; } }
   if (!best) { tip.style.display = 'none'; return; }
@@ -261,10 +275,24 @@ cv.addEventListener('mousemove', e => {
   const actualText = best.a <= 0 ? 'on time' : `${delayBucket(best.a)} (${best.a} min)`;
   tip.innerHTML = `<b>${best.o} → ${best.d}</b> ${best.n}<br>XGBoost: ${(best.x * 100).toFixed(0)}%<br>GRU: ${(best.g * 100).toFixed(0)}%<br>Actual: ${actualText}`;
 });
-cv.addEventListener('mouseleave', () => $('tip').style.display = 'none');
+cv.addEventListener('mouseleave', () => {
+  $('tip').style.display = 'none';
+  view.drag = false;
+});
+cv.addEventListener('mousedown', e => {
+  view.drag = true; view.lastX = e.clientX; view.lastY = e.clientY;
+});
+cv.addEventListener('mouseup', () => { view.drag = false; });
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? 0.9 : 1.1;
+  view.zoom = Math.max(0.8, Math.min(2.5, view.zoom * delta));
+  resize();
+}, { passive: false });
 
 $('play').onclick = () => { playing = !playing; $('play').textContent = playing ? 'Pause' : 'Play'; };
 $('restart').onclick = () => reset();
+$('resetView').onclick = () => { view.zoom = 1.0; view.panX = 0; view.panY = 0; resize(); };
 $('speed').onchange = e => speed = +e.target.value;
 document.querySelectorAll('[data-m]').forEach(b => b.onclick = () => {
   mode = b.dataset.m;
