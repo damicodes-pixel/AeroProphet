@@ -162,6 +162,154 @@ It also computes rolling airport, route, and state-route disruption context usin
 
 These features are designed to encode the idea that delay propagation is not purely a property of a single flight, but a property of the recent operational state surrounding the aircraft and network.
 
+### Operational context statistics
+
+Observed aircraft-history statistics from the processed dataset:
+
+```text
+Previous arrival delay
+Mean:       12.44 min
+Median:      0.00 min
+75th pct:    7.00 min
+Maximum:  4336.00 min
+
+Previous-leg information available
+Mean: 80%
+
+Previous-leg cancellation rate
+Mean: 1%
+
+Previous-leg diversion rate
+Mean: <1%
+
+Turnaround time
+Mean:   194.66 min
+Median:  72.00 min
+75th pct: 305.00 min
+Maximum: 720.00 min
+```
+
+---
+
+## Key Evaluation Statistics
+
+### Dataset and split
+
+```text
+Total flight records:       1,500,000
+Model columns:              106
+Training rows:              1,198,721
+Testing rows:               301,279
+Temporal split date:        2025-10-19
+Evaluation method:          chronological 80/20 split by PredictionTime
+```
+
+### XGBoost flight-state model
+
+```text
+Accuracy:          0.8405
+Balanced Accuracy: 0.6049
+```
+
+Classification summary:
+
+```text
+Class           Precision  Recall  F1
+On Time         0.86       0.96   0.90
+Delayed         0.76       0.48   0.59
+Cancelled       0.76       0.37   0.50
+```
+
+Confusion matrix:
+
+```text
+                 Predicted
+              On Time  Delayed  Cancelled
+Actual On Time   218211    8921       237
+Actual Delayed    35055   32963       403
+Actual Cancelled   1947    1494      2048
+```
+
+### GRU propagation model
+
+```text
+Training examples:  1,372,069
+Test examples:      343,071
+Sequence length:    4 flights
+Sequence features:  5 per leg
+GRU hidden size:    32
+Optimizer:          Adam
+Learning rate:      0.001
+Epochs:            5
+Loss:              BCEWithLogitsLoss
+```
+
+Performance:
+
+```text
+Epoch 1: Train Loss 0.4233 | Test ROC-AUC 0.804
+Epoch 2: Train Loss 0.3802 | Test ROC-AUC 0.810
+Epoch 3: Train Loss 0.3765 | Test ROC-AUC 0.814
+Epoch 4: Train Loss 0.3740 | Test ROC-AUC 0.818
+Epoch 5: Train Loss 0.3719 | Test ROC-AUC 0.819
+```
+
+Final GRU evaluation:
+
+```text
+GRU ROC-AUC:              0.819
+GRU PR-AUC:               0.725
+Previous-arrival baseline: 0.578 ROC-AUC
+```
+
+### Context ablation
+
+```text
+Without context features: 0.6169 ROC-AUC
+With context features:    0.8241 ROC-AUC
+Difference:                +0.207 ROC-AUC
+```
+
+### Additional operational models
+
+#### Departure delay model (`DepDel15`)
+
+```text
+Accuracy: 0.8447
+ROC-AUC:  0.8241
+PR-AUC:   0.6989
+```
+
+#### Cancellation model
+
+```text
+Accuracy:   0.9862
+ROC-AUC:    0.9239
+PR-AUC:     0.5535
+Base rate:  1.855%
+```
+
+#### Diversion model
+
+```text
+Accuracy:   0.99784
+ROC-AUC:    0.7232
+PR-AUC:     0.0161
+Base rate:  0.2155%
+```
+
+#### Delay regression (`DepDelayMinutes`)
+
+```text
+Model MAE:            20.97 minutes
+Median baseline MAE:  18.06 minutes
+Mean actual delay:    18.06 minutes
+Median actual delay:   0.00 minutes
+Maximum actual delay: 2601.00 minutes
+```
+
+The regression result is included as a fair evaluation outcome: the model did not beat the median baseline on MAE, and this honest result is retained rather than hidden.
+
 ---
 
 ## XGBoost Flight-State Model
@@ -614,6 +762,89 @@ Visualization
 ```
 
 The system moves beyond isolated flight-delay classification toward modeling aviation as a dynamic operational system, with machine-learning predictions feeding directly into a temporal simulation and visualization environment.
+
+---
+
+## Running AeroProphet on Your Own Machine
+
+### 1) Clone the project
+
+```bash
+git clone <your-repo-url>
+cd AeroProphet
+```
+
+### 2) Create a virtual environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+On Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+### 3) Install dependencies
+
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Alternatively, if you want the package installed in editable mode:
+
+```bash
+pip install -e .
+```
+
+### 4) Run the notebooks
+
+Open the notebooks in Jupyter Lab:
+
+```bash
+jupyter lab
+```
+
+Then run:
+
+- `notebooks/base_model.ipynb` for the XGBoost and flight-state modeling pipeline
+- `notebooks/deep_learning.ipynb` for the GRU propagation model
+
+### 5) Build the simulation replay
+
+After model predictions have been exported, generate the replay data:
+
+```bash
+python scripts/build_replay.py --days 2 --max-flights 12000
+```
+
+This merges the XGBoost and GRU prediction files and writes the replay payload to `web/replay.json`.
+
+### 6) Start the local simulator UI
+
+```bash
+python scripts/serve.py
+```
+
+This serves the dashboard locally at:
+
+```text
+http://localhost:8000
+```
+
+### 7) Optional: build a fresh data fetch
+
+If you want to refresh the BTS raw dataset:
+
+```bash
+python scripts/scrape.py
+```
+
+The project expects the raw data folder to be available in the expected BTS structure before model training begins.
 
 ---
 
