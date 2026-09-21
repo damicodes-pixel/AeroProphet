@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aeroprophet"
+version = "0.1.0"
+description = "Flight disruption forecasting with XGBoost and GRU-based propagation modeling"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "requests",
+  "numpy",
+  "pandas",
+  "pandasql",
+  "scipy",
+  "scikit-learn",
+  "statsmodels",
+  "matplotlib",
+  "seaborn",
+  "plotly",
+  "jupyterlab",
+  "ipykernel",
+  "pyarrow",
+  "openpyxl",
+  "xgboost",
+  "lightgbm",
+  "catboost",
+  "prophet",
+  "optuna",
+  "imbalanced-learn",
+  "mlxtend",
+  "polars",
+  "duckdb",
+  "fastparquet",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
