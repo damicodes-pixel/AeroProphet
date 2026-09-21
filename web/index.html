@@ -19,6 +19,10 @@
   .score { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
   .card { background:#0d1428; border:1px solid var(--line); border-radius:8px; padding:8px; }
   .big { font-size:22px; font-weight:600; }
+  .bucket-panel { background:#0d1428; border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .bucket-header, .bucket-row { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:6px; font-size:11px; }
+  .bucket-header { color:var(--dim); margin-bottom:6px; }
+  .bucket-row { padding-top:4px; border-top:1px solid rgba(255,255,255,0.05); }
   #feed { flex:1; overflow:hidden; display:flex; flex-direction:column; gap:4px; }
   .item { background:#0d1428; border-left:3px solid var(--line); padding:5px 8px; border-radius:4px; }
   .dim { color:var(--dim); }
@@ -42,6 +46,15 @@
     <div class="card"><div class="dim">XGBoost accuracy</div><div class="big" id="sx">–</div><div class="dim" id="rx"></div></div>
     <div class="card"><div class="dim">GRU accuracy</div><div class="big" id="sg">–</div><div class="dim" id="rg"></div></div>
   </div>
+  <div class="bucket-panel">
+    <div class="dim" style="margin-bottom:6px;">Delay buckets</div>
+    <div class="bucket-header">
+      <div>Bucket</div>
+      <div>XGB</div>
+      <div>GRU</div>
+    </div>
+    <div id="buckets"></div>
+  </div>
   <div class="dim">Departures board: delay chance (XGB · GRU), then what actually happened</div>
   <div id="feed"></div>
 </aside>
@@ -50,12 +63,30 @@
 const $ = id => document.getElementById(id);
 const cv = $('c'), ctx = cv.getContext('2d');
 const LEAD = 60;   // minutes a flight shows as "waiting at the gate" before its scheduled departure
+const ACTUAL_DELAY_CAP = 90;
+const BUCKETS = ['15-29 min', '30-44 min', '45-59 min', '60+ min'];
 let R, flights, airports, byActual, endT, W, H, proj, P = {};
 let mode = 'x', speed = 30, playing = true;
 let now = 0, last = performance.now(), sched = 0, resolved = 0, lo = 0, feed = [], stats, air = [], lastUI = 0;
 
 const col = p => `hsl(${130 * (1 - Math.max(0, Math.min(1, p)))},85%,55%)`;   // green -> red
-const val = f => mode === 'a' ? Math.min(f.a / 30, 1) : f[mode];
+const val = f => mode === 'a' ? Math.min(f.a / ACTUAL_DELAY_CAP, 1) : f[mode];
+const delayBucket = mins => {
+  if (mins < 0) return 'on time';
+  if (mins < 15) return 'on time';
+  if (mins < 30) return '15-29 min';
+  if (mins < 45) return '30-44 min';
+  if (mins < 60) return '45-59 min';
+  return '60+ min';
+};
+const delayDetails = mins => `${mins} min delay`;
+const bucketForProbability = p => {
+  if (p < 0.15) return 'on time';
+  if (p < 0.35) return '15-29 min';
+  if (p < 0.55) return '30-44 min';
+  if (p < 0.75) return '45-59 min';
+  return '60+ min';
+};
 
 fetch('replay.json').then(r => r.json()).then(d => {
   R = d; airports = d.airports; flights = d.flights;
@@ -67,7 +98,10 @@ fetch('replay.json').then(r => r.json()).then(d => {
 
 function reset() {
   now = flights[0].t - 30; sched = resolved = lo = 0; feed = [];
-  stats = { x: { n: 0, ok: 0, d: 0, hit: 0 }, g: { n: 0, ok: 0, d: 0, hit: 0 } };
+  stats = {
+    x: { n: 0, ok: 0, d: 0, hit: 0, buckets: Object.fromEntries(BUCKETS.map(b => [b, { n: 0, ok: 0 }])) },
+    g: { n: 0, ok: 0, d: 0, hit: 0, buckets: Object.fromEntries(BUCKETS.map(b => [b, { n: 0, ok: 0 }])) },
+  };
 }
 
 function resize() {
@@ -81,11 +115,17 @@ function resize() {
 addEventListener('resize', () => { if (R) resize(); });
 
 function score(f) {
+  const actualBucket = delayBucket(f.a);
   const late = f.a >= 15;
   for (const m of ['x', 'g']) {
-    const s = stats[m], pred = f[m] >= 0.5;
+    const s = stats[m], pred = f[m] >= 0.5, predBucket = bucketForProbability(f[m]);
     s.n++; if (pred === late) s.ok++;
     if (late) { s.d++; if (pred) s.hit++; }
+    if (actualBucket !== 'on time') {
+      const bucketStats = s.buckets[actualBucket];
+      bucketStats.n++;
+      if (predBucket === actualBucket) bucketStats.ok++;
+    }
   }
 }
 
@@ -171,7 +211,13 @@ function draw() {
   g.addColorStop(0, col(0)); g.addColorStop(1, col(1));
   ctx.fillStyle = g; ctx.fillRect(16, H - 30, 140, 8);
   ctx.fillStyle = '#8a98c4'; ctx.textAlign = 'left';
-  ctx.fillText(mode === 'a' ? 'actual: on time → 30+ min late' : 'chance of a 15+ min delay: 0% → 100%   ·   white ring = models disagree', 16, H - 38);
+  ctx.fillText(
+    mode === 'a'
+      ? 'actual delay: on time → 90+ min late'
+      : 'risk of a 15+ min departure delay: 0% → 100%   ·   white ring = models disagree',
+    16,
+    H - 38
+  );
 }
 
 function ui(t) {
@@ -182,10 +228,19 @@ function ui(t) {
     $('s' + m).textContent = s.n ? (100 * s.ok / s.n).toFixed(1) + '%' : '–';
     $('r' + m).textContent = s.n ? `${s.n} scored · caught ${s.d ? (100 * s.hit / s.d).toFixed(0) : 0}% of delays` : '';
   }
+
+  const rows = BUCKETS.map(bucket => {
+    const x = stats.x.buckets[bucket];
+    const g = stats.g.buckets[bucket];
+    const xAcc = x.n ? (100 * x.ok / x.n).toFixed(1) + '%' : '—';
+    const gAcc = g.n ? (100 * g.ok / g.n).toFixed(1) + '%' : '—';
+    return `<div class="bucket-row"><div>${bucket}</div><div>${xAcc}</div><div>${gAcc}</div></div>`;
+  }).join('');
+  $('buckets').innerHTML = rows;
+
   $('feed').innerHTML = feed.map(f => {
     const out = now < f.dep ? '<span class="dim">waiting…</span>'
-      : f.a >= 15 ? `<b style="color:#ff6b6b">+${f.a} min late</b>`
-      : `<b style="color:#5be38a">${f.a <= 0 ? 'on time' : '+' + f.a + ' min'}</b>`;
+      : `<b style="color:${f.a >= 15 ? '#ff6b6b' : '#5be38a'}">${f.a <= 0 ? 'on time' : delayBucket(f.a)}</b> · ${delayDetails(f.a)}`;
     return `<div class="item" style="border-color:${col(f.g)}"><b>${f.o} → ${f.d}</b> <span class="dim">${f.n}</span><br>XGB ${(f.x * 100).toFixed(0)}% · GRU ${(f.g * 100).toFixed(0)}% → ${out}</div>`;
   }).join('');
 }
@@ -203,7 +258,8 @@ cv.addEventListener('mousemove', e => {
   for (const f of air) { const d = (f._x - mx) ** 2 + (f._y - my) ** 2; if (d < bd) { bd = d; best = f; } }
   if (!best) { tip.style.display = 'none'; return; }
   tip.style.display = 'block'; tip.style.left = mx + 14 + 'px'; tip.style.top = my + 14 + 'px';
-  tip.innerHTML = `<b>${best.o} → ${best.d}</b> ${best.n}<br>XGBoost: ${(best.x * 100).toFixed(0)}%<br>GRU: ${(best.g * 100).toFixed(0)}%<br>Actual: ${best.a >= 15 ? best.a + ' min late' : 'on time (' + best.a + ' min)'}`;
+  const actualText = best.a <= 0 ? 'on time' : `${delayBucket(best.a)} (${best.a} min)`;
+  tip.innerHTML = `<b>${best.o} → ${best.d}</b> ${best.n}<br>XGBoost: ${(best.x * 100).toFixed(0)}%<br>GRU: ${(best.g * 100).toFixed(0)}%<br>Actual: ${actualText}`;
 });
 cv.addEventListener('mouseleave', () => $('tip').style.display = 'none');
 
