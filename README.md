@@ -853,4 +853,4 @@ The project expects the raw data folder to be available in the expected BTS stru
 **Dami Ogunsuyi**
 
 Computer Science @ UMBC
-Machine Learning • AI Systems • Aviation Intelligence
+Machine Learning • AI Systems • 
